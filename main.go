@@ -280,7 +280,7 @@ func main() {
 		if scanPorts {
 			fmt.Printf(" (port scan: %d ports)", len(portsToScan))
 		}
-		fmt.Println("...\n")
+		fmt.Print("...\n\n")
 	}
 
 	ips, err := getIPsInSubnet(subnet)
