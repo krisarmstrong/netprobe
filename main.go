@@ -32,6 +32,7 @@ var (
 	community string
 	timeout   int
 	workers   int
+	verbose   bool
 )
 
 func init() {
@@ -39,6 +40,7 @@ func init() {
 	flag.StringVar(&community, "community", "public", "SNMP community string")
 	flag.IntVar(&timeout, "timeout", 1, "Timeout in seconds for each host")
 	flag.IntVar(&workers, "workers", 50, "Number of concurrent workers")
+	flag.BoolVar(&verbose, "v", false, "Verbose output - show detailed SNMP info")
 }
 
 func main() {
@@ -239,7 +241,7 @@ func querySNMP(ip string) Device {
 	for _, variable := range result.Variables {
 		switch variable.Name {
 		case ".1.3.6.1.2.1.1.1.0":
-			device.SysDescr = truncateString(toString(variable), 60)
+			device.SysDescr = strings.TrimSpace(toString(variable))
 		case ".1.3.6.1.2.1.1.3.0":
 			if ticks, ok := variable.Value.(uint32); ok {
 				device.Uptime = formatUptime(ticks)
@@ -327,53 +329,97 @@ func printResults(devices []Device) {
 		return
 	}
 
-	// Header
-	fmt.Println(strings.Repeat("=", 120))
-	fmt.Printf("%-15s %-17s %-20s %-12s %-50s\n", "IP", "MAC", "Hostname/SysName", "Uptime", "Description")
-	fmt.Println(strings.Repeat("=", 120))
-
 	snmpCount := 0
 	reachableCount := 0
 
-	for _, d := range devices {
-		name := d.SysName
-		if name == "" {
-			name = d.Hostname
-		}
-		if name == "" {
-			name = "-"
-		}
+	if verbose {
+		// Verbose output - detailed info for each device
+		for _, d := range devices {
+			reachableCount++
+			if d.SNMPEnabled {
+				snmpCount++
+			}
 
-		mac := d.MAC
-		if mac == "" {
-			mac = "-"
-		}
+			fmt.Println(strings.Repeat("─", 80))
+			fmt.Printf("│ %-15s │ %s\n", "IP Address", d.IP)
 
-		uptime := d.Uptime
-		if uptime == "" {
-			uptime = "-"
-		}
+			name := d.SysName
+			if name == "" {
+				name = d.Hostname
+			}
+			if name != "" {
+				fmt.Printf("│ %-15s │ %s\n", "Hostname", name)
+			}
 
-		desc := d.SysDescr
-		if desc == "" {
-			if d.SysLocation != "" {
-				desc = "Location: " + d.SysLocation
+			if d.MAC != "" {
+				fmt.Printf("│ %-15s │ %s\n", "MAC Address", d.MAC)
+			}
+
+			if d.SNMPEnabled {
+				fmt.Printf("│ %-15s │ %s\n", "SNMP", "✓ Enabled")
+				if d.SysDescr != "" {
+					fmt.Printf("│ %-15s │ %s\n", "System", d.SysDescr)
+				}
+				if d.Uptime != "" {
+					fmt.Printf("│ %-15s │ %s\n", "Uptime", d.Uptime)
+				}
+				if d.SysLocation != "" {
+					fmt.Printf("│ %-15s │ %s\n", "Location", d.SysLocation)
+				}
+				if d.SysContact != "" {
+					fmt.Printf("│ %-15s │ %s\n", "Contact", d.SysContact)
+				}
 			} else {
-				desc = "-"
+				fmt.Printf("│ %-15s │ %s\n", "SNMP", "✗ Not available")
 			}
 		}
+		fmt.Println(strings.Repeat("─", 80))
+	} else {
+		// Compact table output
+		fmt.Println(strings.Repeat("=", 120))
+		fmt.Printf("%-15s %-17s %-20s %-12s %-50s\n", "IP", "MAC", "Hostname/SysName", "Uptime", "Description")
+		fmt.Println(strings.Repeat("=", 120))
 
-		status := ""
-		if d.SNMPEnabled {
-			status = "[SNMP]"
-			snmpCount++
+		for _, d := range devices {
+			name := d.SysName
+			if name == "" {
+				name = d.Hostname
+			}
+			if name == "" {
+				name = "-"
+			}
+
+			mac := d.MAC
+			if mac == "" {
+				mac = "-"
+			}
+
+			uptime := d.Uptime
+			if uptime == "" {
+				uptime = "-"
+			}
+
+			desc := d.SysDescr
+			if desc == "" {
+				if d.SysLocation != "" {
+					desc = "Location: " + d.SysLocation
+				} else {
+					desc = "-"
+				}
+			}
+
+			status := ""
+			if d.SNMPEnabled {
+				status = "[SNMP]"
+				snmpCount++
+			}
+			reachableCount++
+
+			fmt.Printf("%-15s %-17s %-20s %-12s %-50s %s\n",
+				d.IP, mac, truncateString(name, 20), uptime, truncateString(desc, 50), status)
 		}
-		reachableCount++
-
-		fmt.Printf("%-15s %-17s %-20s %-12s %-50s %s\n",
-			d.IP, mac, truncateString(name, 20), uptime, truncateString(desc, 50), status)
+		fmt.Println(strings.Repeat("=", 120))
 	}
 
-	fmt.Println(strings.Repeat("=", 120))
-	fmt.Printf("Total: %d devices found (%d with SNMP)\n", reachableCount, snmpCount)
+	fmt.Printf("\nTotal: %d devices found (%d with SNMP)\n", reachableCount, snmpCount)
 }
