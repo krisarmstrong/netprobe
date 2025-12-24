@@ -3,12 +3,16 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gosnmp/gosnmp"
+	"gopkg.in/yaml.v3"
 )
 
 // PortInfo represents an open port with service banner
@@ -69,6 +74,17 @@ var portNames = map[int]string{
 	27017: "mongodb",
 }
 
+// Config represents the configuration file structure
+type Config struct {
+	Subnet    string `yaml:"subnet"`
+	Community string `yaml:"community"`
+	Timeout   int    `yaml:"timeout"`
+	Workers   int    `yaml:"workers"`
+	Ports     string `yaml:"ports"`
+	Verbose   bool   `yaml:"verbose"`
+	NoColor   bool   `yaml:"no_color"`
+}
+
 var (
 	subnet      string
 	community   string
@@ -79,11 +95,15 @@ var (
 	portSpec    string
 	noColor     bool
 	jsonOutput  bool
+	csvOutput   string
+	configFile  string
 	showVersion bool
 	portsToScan []int
+	arpCache    map[string]string
+	arpMutex    sync.RWMutex
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 // ANSI color codes
 const (
@@ -110,11 +130,13 @@ func init() {
 	flag.StringVar(&portSpec, "p", "", "Port spec: 80 | 22,80,443 | 1-1024 | 22,80,8000-9000")
 	flag.BoolVar(&noColor, "no-color", false, "Disable colored output")
 	flag.BoolVar(&jsonOutput, "json", false, "Output results as JSON")
+	flag.StringVar(&csvOutput, "csv", "", "Export results to CSV file")
+	flag.StringVar(&configFile, "config", "", "Config file path (default: ~/.netprobe.yaml)")
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `
-%snetprobe%s - Network discovery and SNMP scanner
+%snetprobe%s v%s - Network discovery and SNMP scanner
 
 %sUSAGE%s
     netprobe [options]
@@ -130,7 +152,9 @@ func init() {
 
     -v                 Verbose output with detailed device info
     -json              Output as JSON (for scripting)
+    -csv <file>        Export results to CSV file
     -no-color          Disable colored output
+    -config <file>     Config file (default: ~/.netprobe.yaml)
     -version           Show version
 
 %sEXAMPLES%s
@@ -139,15 +163,22 @@ func init() {
     netprobe -v -p 22,80,443          Verbose output with port details
     netprobe -subnet 192.168.1.0/24   Scan specific subnet
     netprobe -json -p 22,80           JSON output for scripting
+    netprobe -csv scan.csv -p 22,80   Export to CSV file
     netprobe -community private       Use different SNMP community
 
-%sOUTPUT%s
-    Default view shows IP, hostname, SNMP status, and open ports.
-    Use -v for detailed system info, kernel versions, and service banners.
-    Use -json to pipe results to jq or other tools.
+%sCONFIG FILE%s (~/.netprobe.yaml)
+    subnet: "192.168.1.0/24"
+    community: "public"
+    timeout: 1
+    workers: 50
+    ports: "22,80,443"
+    verbose: false
 
-`, colorBold, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset)
+`, colorBold, colorReset, version, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset)
 	}
+
+	// Initialize ARP cache
+	arpCache = make(map[string]string)
 }
 
 // Color helper functions
@@ -199,10 +230,16 @@ func main() {
 		os.Exit(0)
 	}
 
-	// JSON output disables colors
-	if jsonOutput {
+	// Load config file (before processing other flags so CLI can override)
+	loadConfig()
+
+	// JSON/CSV output disables colors
+	if jsonOutput || csvOutput != "" {
 		noColor = true
 	}
+
+	// Populate ARP cache for MAC detection
+	populateARPCache()
 
 	// If -p is specified, enable port scanning
 	if portSpec != "" {
@@ -260,6 +297,17 @@ func main() {
 	})
 
 	printResults(devices)
+
+	// Export to CSV if requested
+	if csvOutput != "" {
+		if err := writeCSV(devices, csvOutput); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing CSV: %v\n", err)
+			os.Exit(1)
+		}
+		if !jsonOutput {
+			fmt.Printf("Results exported to %s\n", csvOutput)
+		}
+	}
 }
 
 // parsePorts parses a port specification string into a list of ports
@@ -724,9 +772,184 @@ func lookupHostname(ip string) string {
 }
 
 func lookupMAC(ip string) string {
-	// Try to get MAC from ARP cache (works on local subnet)
-	// This is a simplified approach - real implementation would use ARP
+	arpMutex.RLock()
+	defer arpMutex.RUnlock()
+	if mac, ok := arpCache[ip]; ok {
+		return mac
+	}
 	return ""
+}
+
+// populateARPCache reads the system ARP table
+func populateARPCache() {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin", "freebsd":
+		cmd = exec.Command("arp", "-an")
+	case "linux":
+		cmd = exec.Command("arp", "-n")
+	case "windows":
+		cmd = exec.Command("arp", "-a")
+	default:
+		return
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	arpMutex.Lock()
+	defer arpMutex.Unlock()
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var ip, mac string
+
+		switch runtime.GOOS {
+		case "darwin", "freebsd":
+			// Format: ? (192.168.1.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]
+			re := regexp.MustCompile(`\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-fA-F:]+)`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) >= 3 {
+				ip = matches[1]
+				mac = strings.ToUpper(matches[2])
+			}
+		case "linux":
+			// Format: 192.168.1.1  ether   aa:bb:cc:dd:ee:ff   C   eth0
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[1] == "ether" {
+				ip = fields[0]
+				mac = strings.ToUpper(fields[2])
+			}
+		case "windows":
+			// Format: 192.168.1.1      aa-bb-cc-dd-ee-ff     dynamic
+			re := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]+)`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) >= 3 {
+				ip = matches[1]
+				mac = strings.ToUpper(strings.ReplaceAll(matches[2], "-", ":"))
+			}
+		}
+
+		if ip != "" && mac != "" && mac != "FF:FF:FF:FF:FF:FF" && mac != "(INCOMPLETE)" {
+			arpCache[ip] = mac
+		}
+	}
+}
+
+// loadConfig loads configuration from file
+func loadConfig() {
+	// Determine config file path
+	cfgPath := configFile
+	if cfgPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		cfgPath = filepath.Join(home, ".netprobe.yaml")
+	}
+
+	// Read config file
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return // Config file doesn't exist or can't be read - that's OK
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not parse config file: %v\n", err)
+		return
+	}
+
+	// Apply config values only if CLI flags weren't set
+	if subnet == "" && cfg.Subnet != "" {
+		subnet = cfg.Subnet
+	}
+	if community == "public" && cfg.Community != "" {
+		community = cfg.Community
+	}
+	if timeout == 1 && cfg.Timeout > 0 {
+		timeout = cfg.Timeout
+	}
+	if workers == 50 && cfg.Workers > 0 {
+		workers = cfg.Workers
+	}
+	if portSpec == "" && cfg.Ports != "" {
+		portSpec = cfg.Ports
+	}
+	if !verbose && cfg.Verbose {
+		verbose = cfg.Verbose
+	}
+	if !noColor && cfg.NoColor {
+		noColor = cfg.NoColor
+	}
+}
+
+// writeCSV exports results to a CSV file
+func writeCSV(devices []Device, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	header := []string{"IP", "MAC", "Hostname", "SNMP", "Uptime", "System", "Location", "Ports", "Banners"}
+	if err := writer.Write(header); err != nil {
+		return err
+	}
+
+	// Write data rows
+	for _, d := range devices {
+		hostname := d.SysName
+		if hostname == "" {
+			hostname = d.Hostname
+		}
+
+		snmp := "No"
+		if d.SNMPEnabled {
+			snmp = "Yes"
+		}
+
+		var ports, banners []string
+		for _, p := range d.OpenPorts {
+			portStr := fmt.Sprintf("%d", p.Port)
+			if p.Service != "" {
+				portStr += "/" + p.Service
+			}
+			ports = append(ports, portStr)
+			if p.Banner != "" {
+				banners = append(banners, fmt.Sprintf("%d:%s", p.Port, p.Banner))
+			}
+		}
+
+		row := []string{
+			d.IP,
+			d.MAC,
+			hostname,
+			snmp,
+			d.Uptime,
+			d.SysDescr,
+			d.SysLocation,
+			strings.Join(ports, ";"),
+			strings.Join(banners, ";"),
+		}
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func ipToInt(ip string) uint32 {
@@ -756,10 +979,11 @@ type JSONOutput struct {
 
 // JSONDevice represents a device in JSON output
 type JSONDevice struct {
-	IP          string     `json:"ip"`
-	Hostname    string     `json:"hostname,omitempty"`
-	SNMP        *JSONSNMP  `json:"snmp,omitempty"`
-	Ports       []JSONPort `json:"ports,omitempty"`
+	IP       string     `json:"ip"`
+	MAC      string     `json:"mac,omitempty"`
+	Hostname string     `json:"hostname,omitempty"`
+	SNMP     *JSONSNMP  `json:"snmp,omitempty"`
+	Ports    []JSONPort `json:"ports,omitempty"`
 }
 
 // JSONSNMP represents SNMP data in JSON output
@@ -817,7 +1041,8 @@ func printJSONResults(devices []Device, snmpCount, portCount int) {
 
 	for _, d := range devices {
 		jd := JSONDevice{
-			IP: d.IP,
+			IP:  d.IP,
+			MAC: d.MAC,
 		}
 
 		// Hostname
