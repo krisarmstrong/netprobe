@@ -1,26 +1,68 @@
-# Binaries
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║ Netprobe - .gitignore                                                     ║
+# ╠═══════════════════════════════════════════════════════════════════════════╣
+# ║ Network diagnostic and monitoring probe tool                              ║
+# ║ Stack: Go 1.x                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# ─── Go Binaries ─────────────────────────────────────────────────────────────
+# Main binary (project name)
 netprobe
+netprobe-*
+
+# Platform-specific binaries
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Test binary
+# ─── Go Testing ──────────────────────────────────────────────────────────────
+# Test binaries (automatically generated)
 *.test
 
-# Output of go coverage
+# Coverage reports
 *.out
+coverage.html
+coverage.txt
 
-# Go workspace
+# ─── Go Workspace ────────────────────────────────────────────────────────────
+# Multi-module workspace file (Go 1.18+)
 go.work
+go.work.sum
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# Vendor directory (if using vendoring)
+vendor/
 
-# OS
-.DS_Store
-Thumbs.db
+# ─── Build Artifacts ─────────────────────────────────────────────────────────
+dist/
+build/
+bin/
+
+# ─── Environment & Secrets ───────────────────────────────────────────────────
+.env
+.env.*
+.env.local
+*.pem
+*.key
+*.crt
+
+# Probe configuration overrides
+config.local.yaml
+config.local.json
+
+# ─── Logs & Data ─────────────────────────────────────────────────────────────
+*.log
+logs/
+*.pcap
+*.cap
+
+# Probe test results
+results/
+reports/
+
+# ─── Temporary Files ─────────────────────────────────────────────────────────
+*.tmp
+*.temp
+tmp/
+.tmp_*
