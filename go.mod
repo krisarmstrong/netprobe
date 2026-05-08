@@ -1,6 +1,6 @@
 module github.com/krisarmstrong/netprobe
 
-go 1.26.2
+go 1.26.3
 
 require (
 	github.com/gosnmp/gosnmp v1.43.2
