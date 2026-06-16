@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build artifacts and exit (skip publishing the GitHub release)"
+        description: "Build artifacts and exit without publishing a GitHub release"
         type: boolean
         default: true
 
@@ -22,68 +22,40 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binaries
-        run: |
-          mkdir -p dist
-          for os in linux darwin windows; do
-            for arch in amd64 arm64; do
-              ext=""
-              if [ "$os" = "windows" ]; then
-                ext=".exe"
-              fi
-              echo "Building netprobe-${os}-${arch}${ext}"
-              GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-                go build -trimpath -buildvcs=false -o "dist/netprobe-${os}-${arch}${ext}" .
-            done
-          done
-
-      - name: Verify binary metadata
-        run: |
-          file dist/*
-          ./dist/netprobe-linux-amd64 --help >/dev/null 2>&1 || true
-
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum * > checksums.txt
-          cat checksums.txt
-
-      - name: Upload assembled artifacts (dry-run inspectable)
-        uses: actions/upload-artifact@v7.0.1
+      - name: Run GoReleaser snapshot
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
         with:
-          name: release-bundle-${{ github.ref_type == 'tag' && github.ref_name || format('dryrun-{0}', github.run_id) }}
+          distribution: goreleaser
+          version: v2.15.4
+          args: release --clean --snapshot --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
+        with:
+          distribution: goreleaser
+          version: v2.15.4
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: netprobe-release-${{ github.ref_type == 'tag' && github.ref_name || format('dryrun-{0}', github.run_id) }}
           path: dist/
           retention-days: 14
-
-      - name: Extract release notes from CHANGELOG
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Extracting notes for version ${VERSION}..."
-          # Extract section for this version (from ## [VERSION] to next ## [)
-          sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | head -n -1 > release_notes.md
-          # If nothing found, create fallback
-          if [ ! -s release_notes.md ]; then
-            echo "## Release ${VERSION}" > release_notes.md
-            echo "" >> release_notes.md
-            echo "See [CHANGELOG.md](CHANGELOG.md) for details." >> release_notes.md
-          fi
-          cat release_notes.md
-
-      - name: Create Release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
-        uses: softprops/action-gh-release@v3.0.0
-        with:
-          name: netprobe ${{ github.ref_name }}
-          body_path: release_notes.md
-          files: |
-            dist/*
