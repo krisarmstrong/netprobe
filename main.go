@@ -47,30 +47,30 @@ type Device struct {
 
 // Well-known port names
 var portNames = map[int]string{
-	21:   "ftp",
-	22:   "ssh",
-	23:   "telnet",
-	25:   "smtp",
-	53:   "dns",
-	80:   "http",
-	110:  "pop3",
-	111:  "rpc",
-	135:  "msrpc",
-	139:  "netbios",
-	143:  "imap",
-	443:  "https",
-	445:  "smb",
-	993:  "imaps",
-	995:  "pop3s",
-	1433: "mssql",
-	1521: "oracle",
-	3306: "mysql",
-	3389: "rdp",
-	5432: "postgres",
-	5900: "vnc",
-	6379: "redis",
-	8080: "http-alt",
-	8443: "https-alt",
+	21:    "ftp",
+	22:    "ssh",
+	23:    "telnet",
+	25:    "smtp",
+	53:    "dns",
+	80:    "http",
+	110:   "pop3",
+	111:   "rpc",
+	135:   "msrpc",
+	139:   "netbios",
+	143:   "imap",
+	443:   "https",
+	445:   "smb",
+	993:   "imaps",
+	995:   "pop3s",
+	1433:  "mssql",
+	1521:  "oracle",
+	3306:  "mysql",
+	3389:  "rdp",
+	5432:  "postgres",
+	5900:  "vnc",
+	6379:  "redis",
+	8080:  "http-alt",
+	8443:  "https-alt",
 	27017: "mongodb",
 }
 
@@ -489,7 +489,7 @@ func scanPortsForHost(ip string) []PortInfo {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			address := fmt.Sprintf("%s:%d", ip, p)
+			address := net.JoinHostPort(ip, strconv.Itoa(p))
 			conn, err := net.DialTimeout("tcp", address, time.Duration(timeout)*time.Second)
 			if err == nil {
 				portInfo := PortInfo{Port: p, Service: getServiceName(p)}
@@ -538,7 +538,7 @@ func grabBanner(conn net.Conn, ip string, port int) string {
 func grabHTTPBanner(ip string, port int, useTLS bool) string {
 	var conn net.Conn
 	var err error
-	address := fmt.Sprintf("%s:%d", ip, port)
+	address := net.JoinHostPort(ip, strconv.Itoa(port))
 
 	if useTLS {
 		conn, err = tls.DialWithDialer(
@@ -1266,7 +1266,7 @@ func extractShortBanner(banner string) string {
 	patterns := map[string]string{
 		"nginx":    "nginx",
 		"apache":   "Apache",
-		"openssh":  "",  // Will extract version
+		"openssh":  "", // Will extract version
 		"lighttpd": "lighttpd",
 		"iis":      "IIS",
 		"tomcat":   "Tomcat",
