@@ -1,0 +1,85 @@
+version: 2
+
+project_name: netprobe
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: netprobe
+    main: .
+    binary: netprobe
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+
+archives:
+  - id: archives
+    ids:
+      - netprobe
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+nfpms:
+  - id: linux-packages
+    package_name: netprobe
+    ids:
+      - netprobe
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    maintainer: Kris Armstrong <kris.armstrong@me.com>
+    homepage: https://github.com/krisarmstrong/netprobe
+    license: MIT
+    section: net
+    priority: optional
+    description: Fast network discovery and SNMP scanner.
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/netprobe/README.md
+      - src: CHANGELOG.md
+        dst: /usr/share/doc/netprobe/CHANGELOG.md
+      - src: LICENSE
+        dst: /usr/share/doc/netprobe/LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "0.0.0-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
