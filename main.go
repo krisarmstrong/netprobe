@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,14 +25,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// PortInfo represents an open port with service banner
+// PortInfo represents an open port with service banner.
 type PortInfo struct {
 	Port    int
 	Service string
 	Banner  string
 }
 
-// Device represents a discovered network device
+// Device represents a discovered network device.
 type Device struct {
 	IP          string
 	MAC         string
@@ -45,7 +47,7 @@ type Device struct {
 	OpenPorts   []PortInfo
 }
 
-// Well-known port names
+// Well-known port names.
 var portNames = map[int]string{
 	21:    "ftp",
 	22:    "ssh",
@@ -74,7 +76,7 @@ var portNames = map[int]string{
 	27017: "mongodb",
 }
 
-// Config represents the configuration file structure
+// Config represents the configuration file structure.
 type Config struct {
 	Subnet    string `yaml:"subnet"`
 	Community string `yaml:"community"`
@@ -105,7 +107,7 @@ var (
 
 const version = "1.1.0"
 
-// ANSI color codes
+// ANSI color codes.
 const (
 	colorReset   = "\033[0m"
 	colorBold    = "\033[1m"
@@ -181,7 +183,7 @@ func init() {
 	arpCache = make(map[string]string)
 }
 
-// Color helper functions
+// Color helper functions.
 func c(color, text string) string {
 	if noColor {
 		return text
@@ -201,24 +203,12 @@ func green(text string) string {
 	return c(colorGreen, text)
 }
 
-func red(text string) string {
-	return c(colorRed, text)
-}
-
 func cyan(text string) string {
 	return c(colorCyan, text)
 }
 
 func yellow(text string) string {
 	return c(colorYellow, text)
-}
-
-func blue(text string) string {
-	return c(colorBlue, text)
-}
-
-func magenta(text string) string {
-	return c(colorMagenta, text)
 }
 
 func main() {
@@ -311,13 +301,13 @@ func main() {
 }
 
 // parsePorts parses a port specification string into a list of ports
-// Supports: single (80), list (22,80,443), range (1-1024), or mixed (22,80,8000-9000)
+// Supports: single (80), list (22,80,443), range (1-1024), or mixed (22,80,8000-9000).
 func parsePorts(spec string) ([]int, error) {
 	var ports []int
 	portSet := make(map[int]bool)
 
-	parts := strings.Split(spec, ",")
-	for _, part := range parts {
+	parts := strings.SplitSeq(spec, ",")
+	for part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -412,9 +402,9 @@ func getIPsInSubnet(cidr string) ([]string, error) {
 }
 
 func incrementIP(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
+	for _, v := range slices.Backward(ip) {
+		v++
+		if v > 0 {
 			break
 		}
 	}
@@ -428,10 +418,8 @@ func scanNetwork(ips []string) []Device {
 	jobs := make(chan string, len(ips))
 
 	// Start workers
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for ip := range jobs {
 				device := scanHost(ip)
 				if device.Reachable || device.SNMPEnabled {
@@ -440,7 +428,7 @@ func scanNetwork(ips []string) []Device {
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 
 	// Send jobs
@@ -490,7 +478,8 @@ func scanPortsForHost(ip string) []PortInfo {
 			defer func() { <-sem }()
 
 			address := net.JoinHostPort(ip, strconv.Itoa(p))
-			conn, err := net.DialTimeout("tcp", address, time.Duration(timeout)*time.Second)
+			dialer := net.Dialer{Timeout: time.Duration(timeout) * time.Second}
+			conn, err := dialer.DialContext(context.Background(), "tcp", address)
 			if err == nil {
 				portInfo := PortInfo{Port: p, Service: getServiceName(p)}
 				portInfo.Banner = grabBanner(conn, ip, p)
@@ -517,7 +506,9 @@ func getServiceName(port int) string {
 }
 
 func grabBanner(conn net.Conn, ip string, port int) string {
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return ""
+	}
 
 	switch port {
 	case 80, 8080, 8000, 8888:
@@ -539,22 +530,28 @@ func grabHTTPBanner(ip string, port int, useTLS bool) string {
 	var conn net.Conn
 	var err error
 	address := net.JoinHostPort(ip, strconv.Itoa(port))
+	dialer := net.Dialer{Timeout: 2 * time.Second}
 
 	if useTLS {
-		conn, err = tls.DialWithDialer(
-			&net.Dialer{Timeout: 2 * time.Second},
-			"tcp", address,
-			&tls.Config{InsecureSkipVerify: true},
-		)
+		tlsDialer := tls.Dialer{
+			NetDialer: &dialer,
+			Config: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				ServerName: ip,
+			},
+		}
+		conn, err = tlsDialer.DialContext(context.Background(), "tcp", address)
 	} else {
-		conn, err = net.DialTimeout("tcp", address, 2*time.Second)
+		conn, err = dialer.DialContext(context.Background(), "tcp", address)
 	}
 	if err != nil {
 		return ""
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return ""
+	}
 	fmt.Fprintf(conn, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", ip)
 
 	reader := bufio.NewReader(conn)
@@ -637,33 +634,21 @@ func cleanBanner(s string) string {
 	return s
 }
 
-func formatPort(p PortInfo) string {
-	var parts []string
-	if p.Service != "" {
-		parts = append(parts, fmt.Sprintf("%d/%s", p.Port, p.Service))
-	} else {
-		parts = append(parts, strconv.Itoa(p.Port))
-	}
-	if p.Banner != "" {
-		parts = append(parts, fmt.Sprintf("(%s)", p.Banner))
-	}
-	return strings.Join(parts, " ")
-}
-
 func isReachable(ip string) bool {
-	conn, err := net.DialTimeout("tcp", ip+":22", time.Duration(timeout)*time.Second)
+	dialer := net.Dialer{Timeout: time.Duration(timeout) * time.Second}
+	conn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(ip, "22"))
 	if err == nil {
 		conn.Close()
 		return true
 	}
 
-	conn, err = net.DialTimeout("tcp", ip+":80", time.Duration(timeout)*time.Second)
+	conn, err = dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(ip, "80"))
 	if err == nil {
 		conn.Close()
 		return true
 	}
 
-	conn, err = net.DialTimeout("tcp", ip+":443", time.Duration(timeout)*time.Second)
+	conn, err = dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(ip, "443"))
 	if err == nil {
 		conn.Close()
 		return true
@@ -734,7 +719,10 @@ func querySNMP(ip string) Device {
 func toString(v gosnmp.SnmpPDU) string {
 	switch v.Type {
 	case gosnmp.OctetString:
-		return string(v.Value.([]byte))
+		if value, ok := v.Value.([]byte); ok {
+			return string(value)
+		}
+		return fmt.Sprintf("%v", v.Value)
 	default:
 		return fmt.Sprintf("%v", v.Value)
 	}
@@ -764,7 +752,8 @@ func truncateString(s string, maxLen int) string {
 }
 
 func lookupHostname(ip string) string {
-	names, err := net.LookupAddr(ip)
+	resolver := net.Resolver{}
+	names, err := resolver.LookupAddr(context.Background(), ip)
 	if err != nil || len(names) == 0 {
 		return ""
 	}
@@ -780,17 +769,17 @@ func lookupMAC(ip string) string {
 	return ""
 }
 
-// populateARPCache reads the system ARP table
+// populateARPCache reads the system ARP table.
 func populateARPCache() {
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
 	case "darwin", "freebsd":
-		cmd = exec.Command("arp", "-an")
+		cmd = exec.CommandContext(context.Background(), "arp", "-an")
 	case "linux":
-		cmd = exec.Command("arp", "-n")
+		cmd = exec.CommandContext(context.Background(), "arp", "-n")
 	case "windows":
-		cmd = exec.Command("arp", "-a")
+		cmd = exec.CommandContext(context.Background(), "arp", "-a")
 	default:
 		return
 	}
@@ -803,8 +792,8 @@ func populateARPCache() {
 	arpMutex.Lock()
 	defer arpMutex.Unlock()
 
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(output), "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -844,7 +833,7 @@ func populateARPCache() {
 	}
 }
 
-// loadConfig loads configuration from file
+// loadConfig loads configuration from file.
 func loadConfig() {
 	// Determine config file path
 	cfgPath := configFile
@@ -892,7 +881,7 @@ func loadConfig() {
 	}
 }
 
-// writeCSV exports results to a CSV file
+// writeCSV exports results to a CSV file.
 func writeCSV(devices []Device, filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
@@ -923,7 +912,7 @@ func writeCSV(devices []Device, filename string) error {
 
 		var ports, banners []string
 		for _, p := range d.OpenPorts {
-			portStr := fmt.Sprintf("%d", p.Port)
+			portStr := strconv.Itoa(p.Port)
 			if p.Service != "" {
 				portStr += "/" + p.Service
 			}
@@ -960,13 +949,15 @@ func ipToInt(ip string) uint32 {
 	var result uint32
 	for i, part := range parts {
 		var val uint32
-		fmt.Sscanf(part, "%d", &val)
+		if _, err := fmt.Sscanf(part, "%d", &val); err != nil {
+			return 0
+		}
 		result |= val << (24 - 8*i)
 	}
 	return result
 }
 
-// JSONOutput represents the JSON output structure
+// JSONOutput represents the JSON output structure.
 type JSONOutput struct {
 	Subnet  string       `json:"subnet"`
 	Devices []JSONDevice `json:"devices"`
@@ -977,7 +968,7 @@ type JSONOutput struct {
 	} `json:"summary"`
 }
 
-// JSONDevice represents a device in JSON output
+// JSONDevice represents a device in JSON output.
 type JSONDevice struct {
 	IP       string     `json:"ip"`
 	MAC      string     `json:"mac,omitempty"`
@@ -986,7 +977,7 @@ type JSONDevice struct {
 	Ports    []JSONPort `json:"ports,omitempty"`
 }
 
-// JSONSNMP represents SNMP data in JSON output
+// JSONSNMP represents SNMP data in JSON output.
 type JSONSNMP struct {
 	Enabled     bool   `json:"enabled"`
 	SysName     string `json:"sys_name,omitempty"`
@@ -996,7 +987,7 @@ type JSONSNMP struct {
 	Uptime      string `json:"uptime,omitempty"`
 }
 
-// JSONPort represents a port in JSON output
+// JSONPort represents a port in JSON output.
 type JSONPort struct {
 	Port    int    `json:"port"`
 	Service string `json:"service,omitempty"`
@@ -1066,11 +1057,7 @@ func printJSONResults(devices []Device, snmpCount, portCount int) {
 
 		// Ports
 		for _, p := range d.OpenPorts {
-			jd.Ports = append(jd.Ports, JSONPort{
-				Port:    p.Port,
-				Service: p.Service,
-				Banner:  p.Banner,
-			})
+			jd.Ports = append(jd.Ports, JSONPort(p))
 		}
 
 		output.Devices = append(output.Devices, jd)
@@ -1078,10 +1065,12 @@ func printJSONResults(devices []Device, snmpCount, portCount int) {
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(output)
+	if err := enc.Encode(output); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write JSON output: %v\n", err)
+	}
 }
 
-// printCompactResults - Option C: Minimal clean table
+// printCompactResults - Option C: Minimal clean table.
 func printCompactResults(devices []Device, snmpCount, portCount int) {
 	// Header
 	fmt.Println()
@@ -1096,7 +1085,9 @@ func printCompactResults(devices []Device, snmpCount, portCount int) {
 		colorBold,
 		"IP", "HOSTNAME", "STATUS", "SERVICES",
 		colorReset)
-	fmt.Println(dim("─────────────── ──────────────────────────── ─────────────── ────────────────────────────────────────"))
+	fmt.Println(
+		dim("─────────────── ──────────────────────────── ─────────────── ────────────────────────────────────────"),
+	)
 
 	// Device rows
 	for _, d := range devices {
@@ -1129,7 +1120,9 @@ func printCompactResults(devices []Device, snmpCount, portCount int) {
 	}
 
 	// Footer
-	fmt.Println(dim("───────────────────────────────────────────────────────────────────────────────────────────────────────"))
+	fmt.Println(
+		dim("───────────────────────────────────────────────────────────────────────────────────────────────────────"),
+	)
 	fmt.Printf("%s%d devices%s │ %s%d SNMP%s │ %s%d ports%s\n",
 		colorBold, len(devices), colorReset,
 		colorGreen, snmpCount, colorReset,
@@ -1137,18 +1130,22 @@ func printCompactResults(devices []Device, snmpCount, portCount int) {
 	fmt.Println()
 }
 
-// printVerboseResults - Option B: Tree/card style
+// printVerboseResults - Option B: Tree/card style.
 func printVerboseResults(devices []Device, snmpCount, portCount int) {
 	// Header box
 	fmt.Println()
-	fmt.Println(dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"))
+	fmt.Println(
+		dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"),
+	)
 	fmt.Printf("  %s%s%s", colorBold, "NETPROBE", colorReset)
 	fmt.Printf("%s│ %s │ %d devices%s\n",
 		strings.Repeat(" ", 55),
 		cyan(subnet),
 		len(devices),
 		colorReset)
-	fmt.Println(dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"))
+	fmt.Println(
+		dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"),
+	)
 	fmt.Println()
 
 	// Device cards
@@ -1199,7 +1196,7 @@ func printVerboseResults(devices []Device, snmpCount, portCount int) {
 					prefix = "└──"
 				}
 
-				portNum := fmt.Sprintf("%d", p.Port)
+				portNum := strconv.Itoa(p.Port)
 				service := p.Service
 				if service == "" {
 					service = "unknown"
@@ -1224,17 +1221,21 @@ func printVerboseResults(devices []Device, snmpCount, portCount int) {
 	}
 
 	// Footer
-	fmt.Println(dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"))
+	fmt.Println(
+		dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"),
+	)
 	fmt.Printf("  %sSummary:%s %d devices │ %s%d with SNMP%s │ %s%d open ports%s\n",
 		colorBold, colorReset,
 		len(devices),
 		colorGreen, snmpCount, colorReset,
 		colorCyan, portCount, colorReset)
-	fmt.Println(dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"))
+	fmt.Println(
+		dim("═══════════════════════════════════════════════════════════════════════════════════════════════════════"),
+	)
 	fmt.Println()
 }
 
-// formatServicesCompact formats ports for compact display
+// formatServicesCompact formats ports for compact display.
 func formatServicesCompact(ports []PortInfo) string {
 	if len(ports) == 0 {
 		return dim("·")
@@ -1242,7 +1243,7 @@ func formatServicesCompact(ports []PortInfo) string {
 
 	var parts []string
 	for _, p := range ports {
-		part := yellow(fmt.Sprintf("%d", p.Port))
+		part := yellow(strconv.Itoa(p.Port))
 		if p.Banner != "" {
 			// Extract short banner (e.g., "nginx" from full server string)
 			shortBanner := extractShortBanner(p.Banner)
@@ -1258,7 +1259,7 @@ func formatServicesCompact(ports []PortInfo) string {
 	return strings.Join(parts, dim(" │ "))
 }
 
-// extractShortBanner extracts a short service identifier from banner
+// extractShortBanner extracts a short service identifier from banner.
 func extractShortBanner(banner string) string {
 	banner = strings.ToLower(banner)
 
@@ -1278,8 +1279,8 @@ func extractShortBanner(banner string) string {
 		if strings.Contains(banner, pattern) {
 			if pattern == "openssh" {
 				// Extract OpenSSH version like "OpenSSH_9.9p1"
-				parts := strings.Fields(banner)
-				for _, part := range parts {
+				parts := strings.FieldsSeq(banner)
+				for part := range parts {
 					if strings.HasPrefix(strings.ToLower(part), "ssh-2.0-openssh") {
 						version := strings.TrimPrefix(part, "SSH-2.0-")
 						return version
